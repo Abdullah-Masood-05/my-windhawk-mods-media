@@ -12,10 +12,16 @@ an optional **experimental** app-launch animation (off by default).
 
 ## Task Manager Tab Slide Animation
 
-A smooth slide transition when switching tabs (Processes, Performance, …) in the
-Windows 11 Task Manager.
+A smooth animated transition - **crossfade** or **slide** - when switching tabs
+(Processes, Performance, …) in the Windows 11 Task Manager.
 
-![Task Manager Tab Slide Animation](./taskmgr-tab-slide-animation.gif)
+**Crossfade:**
+
+![Task Manager crossfade](./taskmgr-tab-slide-animation-fade-v2.gif)
+
+**Slide:**
+
+![Task Manager slide](./taskmgr-tab-slide-animation-slide-v2.gif)
 
 ---
 
