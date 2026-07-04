@@ -8,12 +8,16 @@ the official catalog: <https://github.com/ramensoftware/windhawk-mods>
 Smooth macOS-style genie minimize / restore (open) animations for every window, with
 an optional **experimental** app-launch animation (off by default).
 
+**Install:** <https://windhawk.net/mods/macos-minimize-animation>
+
 ![MacOS Minimize Animation](./macos-minimize-animation.gif)
 
 ## Task Manager Tab Slide Animation
 
 A smooth animated transition - **crossfade** or **slide** - when switching tabs
 (Processes, Performance, …) in the Windows 11 Task Manager.
+
+**Install:** <https://windhawk.net/mods/taskmgr-tab-slide-animation>
 
 **Crossfade:**
 
