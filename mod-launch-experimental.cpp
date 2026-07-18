@@ -262,6 +262,13 @@ Check out the documentation
 #define COMPAT_TASKBAR_HEIGHT 70
 #define COMPAT_ICON_SIZE      33
 
+// High-resolution waitable timer flag (Win10 1803+). Guarded so the mod still
+// builds against older SDK headers; if the OS lacks it the flag is rejected at
+// runtime and the pacer falls back to a busy spin.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
 // Ported from Potassiumuncher's genie engine (github.com/Potassiumuncher).
 struct Geometry { float x, y, width, height; };
 
@@ -942,12 +949,11 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
 
     // Potassiumuncher's v1.5 frame pacer, extended in v3.2.0 for high-refresh
     // displays: pace delivery at the hosting monitor's own refresh interval
-    // instead of a hard ~120fps cap. On the primary monitor DwmFlush below is
-    // the real vsync gate and this pacer only bounds render cost; on
-    // NON-primary monitors DwmFlush's compose tick can follow a different
-    // panel's refresh (typically the primary's), which pinned e.g. a 180Hz
-    // secondary to the primary's ~60fps cadence - there the pacer takes over
-    // as the gate and the per-frame DwmFlush is skipped (see the gate below).
+    // instead of a hard ~120fps cap. Read the hosting monitor's refresh so the
+    // per-frame target matches the panel (5.5ms at 180Hz, 14ms at 71Hz, ...).
+    // On the primary monitor DwmFlush below is the vsync gate; on a NON-primary
+    // monitor DwmFlush's compose tick can follow another panel's refresh, so
+    // there the QPC pacer becomes the gate and the per-frame DwmFlush is skipped.
     int paceHz = 120;            // fallback when the refresh rate can't be read
     BOOL pacerIsGate = FALSE;    // TRUE: QPC pacer replaces DwmFlush as the gate
     {
@@ -967,6 +973,15 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
     const double kTargetFrameMs = 1000.0 / (double)paceHz;
     LARGE_INTEGER qpcLastFrame = qpcStart;
 
+    // The pacer's wait needs sub-millisecond precision or it can't hit a
+    // high-refresh interval: plain Sleep() rounds up to the system timer
+    // granularity (~15.6ms by default), which silently caps delivery at ~64fps
+    // on ANY panel faster than that - smooth-looking at 60-71Hz but visibly
+    // choppy at 120/144/180Hz. A high-resolution waitable timer waits to ~0.5ms.
+    // NULL on pre-1803 Windows -> the wait loop falls back to a busy spin.
+    HANDLE hPaceTimer = CreateWaitableTimerExW(
+        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
     if (d2dOk) {
         for (;;) {
             for (;;) {
@@ -974,8 +989,16 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
                 double sinceLastMs = (qpcNow.QuadPart - qpcLastFrame.QuadPart) * 1000.0 / qpcFreq.QuadPart;
                 if (sinceLastMs >= kTargetFrameMs) break;
                 double remainingMs = kTargetFrameMs - sinceLastMs;
-                if (remainingMs > 2.0) {
-                    Sleep((DWORD)(remainingMs - 1.0));
+                // Wait the bulk on the hi-res timer, spin the last ~0.5ms so we
+                // land on the target instead of overshooting past it.
+                if (hPaceTimer && remainingMs > 0.6) {
+                    LARGE_INTEGER due;
+                    due.QuadPart = -(LONGLONG)((remainingMs - 0.5) * 10000.0); // rel, 100ns units
+                    if (SetWaitableTimer(hPaceTimer, &due, 0, nullptr, nullptr, FALSE)) {
+                        WaitForSingleObject(hPaceTimer, (DWORD)remainingMs + 2);
+                    } else {
+                        YieldProcessor();
+                    }
                 } else {
                     YieldProcessor();
                 }
@@ -1183,6 +1206,8 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
             }
         }
     }
+
+    if (hPaceTimer) { CloseHandle(hPaceTimer); hPaceTimer = nullptr; }
 
     if (cachedOutlineGeo) { cachedOutlineGeo->Release(); cachedOutlineGeo = nullptr; }
 
