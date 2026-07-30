@@ -2,7 +2,7 @@
 // @id              macos-minimize-animation
 // @name            MacOS Minimize Animation
 // @description     Smooth macOS-style genie minimize and restore (open) animations for every window.
-// @version         3.2.0
+// @version         3.1.2
 // @author          Abdullah Masood
 // @github          https://github.com/Abdullah-Masood-05
 // @include         *
@@ -420,6 +420,12 @@ void MacGenieLoadSettings() {
     {
         std::lock_guard<std::mutex> lock(g_CacheMutex);
         g_ExcludedPrograms.swap(excluded);
+        
+        // Add default compatibility exclusions if user hasn't set any
+        if (g_ExcludedPrograms.empty()) {
+            g_ExcludedPrograms.push_back(L"lively.exe");
+            g_ExcludedPrograms.push_back(L"livelywpf.exe");
+        }
     }
 }
 
@@ -534,11 +540,63 @@ static void MacGenieUndoRisingHide(HWND hWnd, LONG_PTR originalExStyle, BOOL clo
     MacGenieSetDwmTransitions(hWnd, TRUE);
 }
 
+// Detect special desktop-embedded windows (Lively Wallpaper, etc.)
+// These windows are embedded into the desktop and should NEVER be animated
+static bool MacGenieIsSpecialDesktopWindow(HWND hWnd) {
+    if (!hWnd) return false;
+    
+    // Check if the window is a child of the desktop or Progman
+    HWND hParent = GetParent(hWnd);
+    HWND hDesktop = GetDesktopWindow();
+    HWND hProgman = FindWindowW(L"Progman", NULL);
+    HWND hWorkerW = FindWindowExW(NULL, NULL, L"WorkerW", NULL);
+    
+    // Desktop-embedded windows often have Progman or WorkerW as ancestor
+    if (hParent == hDesktop || hParent == hProgman || hParent == hWorkerW) {
+        return true;
+    }
+    
+    // Check for specific extended styles that indicate desktop embedding
+    LONG_PTR exStyle = GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
+    
+    // Lively Wallpaper uses these style combinations
+    if ((exStyle & WS_EX_NOACTIVATE) && (exStyle & WS_EX_TOOLWINDOW)) {
+        LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
+        if (!(style & WS_CAPTION) && !(style & WS_SYSMENU)) {
+            return true;
+        }
+    }
+    
+    // Check window class name
+    WCHAR className[256] = {0};
+    if (GetClassNameW(hWnd, className, 256)) {
+        std::wstring cls = className;
+        std::transform(cls.begin(), cls.end(), cls.begin(), ::towlower);
+        if (cls.find(L"lively") != std::wstring::npos ||
+            cls.find(L"wallpaper") != std::wstring::npos ||
+            cls.find(L"splash") != std::wstring::npos ||
+            cls.find(L"rainmeter") != std::wstring::npos) {
+            return true;
+        }
+        
+        if (cls.find(L"desktop") != std::wstring::npos &&
+            cls.find(L"overlay") != std::wstring::npos) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 // Should we animate this window at all? Skip child / tiny windows so the effect
 // only fires on real top-level windows. The size check stays on the placement /
 // window rect; the animation geometry (below) uses the DWM extended frame bounds.
 static bool MacGenieShouldAnimate(HWND hWnd) {
     if (!hWnd) return false;
+    
+    // Skip special desktop-embedded windows FIRST
+    if (MacGenieIsSpecialDesktopWindow(hWnd)) return false;
+    
     LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
     if (style & WS_CHILD) return false;
 
