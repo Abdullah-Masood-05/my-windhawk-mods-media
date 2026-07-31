@@ -74,14 +74,10 @@ style is the mod's original renderer.
   animation instead of letting the window background vanish - so translucent
   windows on a secondary display animate with the older dark look. A proper fix
   needs deeper investigation.
-- A repeating / looping animation has been reported on Firefox and
-  Firefox-based browsers (e.g. Zen). As of v3.2.0 the mod ships an automatic
-  loop breaker: if a window re-triggers animations back-to-back several times
-  in a row, its animations are muted for a few seconds (minimize / restore
-  still work, just without the genie) until it calms down. The root cause is
-  still under investigation - if the loop still hits you, add the browser to
-  the **Excluded programs** setting and please share details on the GitHub
-  issue thread.
+- A repeating / looping animation has been reported on Zen Browser
+  (Firefox-based). It's under investigation; if it hits you, add the browser to
+  the mod's **Excluded programs** setting as a workaround and please share
+  details on the GitHub issue thread.
 
 ## See it in action
 - Compile the mod with the button on the left or with Ctrl+B.
@@ -99,12 +95,6 @@ style is the mod's original renderer.
 - **Actually smooth.** Progress is driven by real elapsed time and every rendered
   frame is gated on the DWM compose cycle (`DwmFlush`), so each frame you render is
   exactly one frame you see - perfectly aligned with vsync at any duration you set.
-- **High refresh rate aware** (v3.2.0). The modern engine paces frames at the
-  hosting monitor's actual refresh rate (up to 240 Hz) instead of a fixed ~120fps
-  cap. On non-primary monitors - where Windows' compose tick follows a different
-  panel and used to pin the animation to the primary's cadence - the mod paces
-  itself at that monitor's true interval. For this to kick in on a secondary
-  display, enable **Multi-monitor support**.
 - **Smoothstep easing** instead of a linear ramp, so it eases in and out.
 - **Accurate targeting.** The mod locates the app's actual taskbar button via UI
   Automation and aims the genie at it (with a per-process fallback cache), instead
@@ -159,10 +149,6 @@ minimize behind it without the system's own animation getting in the way.
   Since v3.1.1 the capture preserves per-pixel transparency (Potassiumuncher's
   fix), so translucent windows keep their see-through regions during the genie
   instead of flattening to grey.
-- Since v3.2.0 the modern engine paces at the hosting monitor's refresh rate
-  (suggested by a user with a 180 Hz display - thanks!). Higher refresh means
-  proportionally more frames rendered per animation, so CPU/GPU cost during the
-  (brief) animation scales with your refresh rate.
 
 # Getting started
 Check out the documentation
@@ -262,13 +248,6 @@ Check out the documentation
 #define COMPAT_TASKBAR_HEIGHT 70
 #define COMPAT_ICON_SIZE      33
 
-// High-resolution waitable timer flag (Win10 1803+). Guarded so the mod still
-// builds against older SDK headers; if the OS lacks it the flag is rejected at
-// runtime and the pacer falls back to a busy spin.
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
-
 // Ported from Potassiumuncher's genie engine (github.com/Potassiumuncher).
 struct Geometry { float x, y, width, height; };
 
@@ -356,19 +335,6 @@ std::atomic<int> g_tileCount{TILE_COUNT_DEFAULT};
 // (written only from LoadSettings, read once per animation start).
 std::vector<std::wstring> g_ExcludedPrograms;
 
-// Anti-loop circuit breaker (v3.2.0). Some apps (reported on Firefox and
-// Firefox-based browsers) re-issue minimize/restore commands the moment each
-// animation finishes, chaining genies forever. Per-window record of animation
-// start times: a streak of back-to-back starts trips the breaker, which mutes
-// that window's animations (real minimize/restore still happen instantly)
-// until it calms down. Guarded by g_CacheMutex.
-struct MacGenieBurst {
-    DWORD lastStartTick = 0;
-    int   streak = 0;
-    DWORD suppressedUntil = 0;   // 0 = not muted
-};
-std::unordered_map<HWND, MacGenieBurst> g_AnimBursts;
-
 // --- UNLOAD COORDINATION ---
 // Windhawk unmaps the mod DLL right after uninit, so any worker thread still
 // running mod code at that point would crash its host process. Workers register
@@ -420,12 +386,6 @@ void MacGenieLoadSettings() {
     {
         std::lock_guard<std::mutex> lock(g_CacheMutex);
         g_ExcludedPrograms.swap(excluded);
-        
-        // Add default compatibility exclusions if user hasn't set any
-        if (g_ExcludedPrograms.empty()) {
-            g_ExcludedPrograms.push_back(L"lively.exe");
-            g_ExcludedPrograms.push_back(L"livelywpf.exe");
-        }
     }
 }
 
@@ -468,49 +428,6 @@ bool MacGenieIsExcluded(HWND hWnd) {
     return false;
 }
 
-// TRUE = the anti-loop breaker is muting this window's animations. Called once
-// per animation start at the StartMacGenieAnim choke point. A "streak" is
-// consecutive starts spaced less than one animation length (+ margin) apart -
-// the signature of an app fighting the mod by re-minimizing / re-restoring the
-// instant each genie ends (the Firefox-family loop reports). Five in a row
-// mutes the window for 5s; attempts made while muted keep extending the mute,
-// so a persistent loop stays muted until it actually stops. The real
-// minimize/restore proceed instantly the whole time.
-bool MacGenieLoopBreakerTripped(HWND hWnd) {
-    DWORD now = GetTickCount();
-    DWORD gapLimit = (DWORD)g_durationMs.load(std::memory_order_relaxed) + 500;
-    std::lock_guard<std::mutex> lock(g_CacheMutex);
-
-    // Keep the table tiny: drop long-idle, unmuted windows.
-    if (g_AnimBursts.size() > 64) {
-        for (auto it = g_AnimBursts.begin(); it != g_AnimBursts.end();) {
-            if (now - it->second.lastStartTick > 30000 &&
-                (it->second.suppressedUntil == 0 ||
-                 (LONG)(it->second.suppressedUntil - now) <= 0)) {
-                it = g_AnimBursts.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
-    MacGenieBurst& b = g_AnimBursts[hWnd];
-    if (b.suppressedUntil && (LONG)(b.suppressedUntil - now) > 0) {
-        b.suppressedUntil = now + 5000;   // still looping: stay muted
-        b.lastStartTick = now;
-        return true;
-    }
-    b.streak = (b.lastStartTick && now - b.lastStartTick <= gapLimit) ? b.streak + 1 : 1;
-    b.lastStartTick = now;
-    if (b.streak >= 5) {
-        b.streak = 0;
-        b.suppressedUntil = now + 5000;
-        Wh_Log(L"Loop breaker tripped for hwnd=%p: muting animations for 5s", hWnd);
-        return true;
-    }
-    return false;
-}
-
 void MacGenieSetDwmTransitions(HWND hWnd, BOOL enable) {
     BOOL disable = !enable;
     DwmSetWindowAttribute(hWnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
@@ -540,63 +457,11 @@ static void MacGenieUndoRisingHide(HWND hWnd, LONG_PTR originalExStyle, BOOL clo
     MacGenieSetDwmTransitions(hWnd, TRUE);
 }
 
-// Detect special desktop-embedded windows (Lively Wallpaper, etc.)
-// These windows are embedded into the desktop and should NEVER be animated
-static bool MacGenieIsSpecialDesktopWindow(HWND hWnd) {
-    if (!hWnd) return false;
-    
-    // Check if the window is a child of the desktop or Progman
-    HWND hParent = GetParent(hWnd);
-    HWND hDesktop = GetDesktopWindow();
-    HWND hProgman = FindWindowW(L"Progman", NULL);
-    HWND hWorkerW = FindWindowExW(NULL, NULL, L"WorkerW", NULL);
-    
-    // Desktop-embedded windows often have Progman or WorkerW as ancestor
-    if (hParent == hDesktop || hParent == hProgman || hParent == hWorkerW) {
-        return true;
-    }
-    
-    // Check for specific extended styles that indicate desktop embedding
-    LONG_PTR exStyle = GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
-    
-    // Lively Wallpaper uses these style combinations
-    if ((exStyle & WS_EX_NOACTIVATE) && (exStyle & WS_EX_TOOLWINDOW)) {
-        LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
-        if (!(style & WS_CAPTION) && !(style & WS_SYSMENU)) {
-            return true;
-        }
-    }
-    
-    // Check window class name
-    WCHAR className[256] = {0};
-    if (GetClassNameW(hWnd, className, 256)) {
-        std::wstring cls = className;
-        std::transform(cls.begin(), cls.end(), cls.begin(), ::towlower);
-        if (cls.find(L"lively") != std::wstring::npos ||
-            cls.find(L"wallpaper") != std::wstring::npos ||
-            cls.find(L"splash") != std::wstring::npos ||
-            cls.find(L"rainmeter") != std::wstring::npos) {
-            return true;
-        }
-        
-        if (cls.find(L"desktop") != std::wstring::npos &&
-            cls.find(L"overlay") != std::wstring::npos) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
 // Should we animate this window at all? Skip child / tiny windows so the effect
 // only fires on real top-level windows. The size check stays on the placement /
 // window rect; the animation geometry (below) uses the DWM extended frame bounds.
 static bool MacGenieShouldAnimate(HWND hWnd) {
     if (!hWnd) return false;
-    
-    // Skip special desktop-embedded windows FIRST
-    if (MacGenieIsSpecialDesktopWindow(hWnd)) return false;
-    
     LONG_PTR style = GetWindowLongPtrW(hWnd, GWL_STYLE);
     if (style & WS_CHILD) return false;
 
@@ -871,15 +736,18 @@ static void CalculateLampVertexMacOS(float tx, float ty, float p, const Geometry
 // -------------------------------------------------------------------------
 // Genie Animation Thread
 //
-// MINE's loop and lifecycle - g_workerCount, g_unloading early-out, DwmFlush
-// pacing, the first-frame sync event, g_AnimActive teardown - with HIS's Direct2D
-// mesh renderer as the per-frame draw call. HIS's original busy for(;;) with no
-// compose gating is dropped in favor of MINE's DwmFlush vsync pace-gate.
+// MINE's loop and lifecycle - g_workerCount, g_unloading early-out, the
+// first-frame sync event, g_AnimActive teardown - with HIS's Direct2D mesh
+// renderer as the per-frame draw call. Rendering is uncapped like HIS's original
+// busy for(;;), so DWM always composites the freshest frame at each vsync.
 // -------------------------------------------------------------------------
 DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
     MacGenieAnimData* data = (MacGenieAnimData*)lpParam;
 
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    // Matches the standalone custom-animations-genie mod's render thread so the
+    // animation is equally smooth: TIME_CRITICAL preempts other work for the
+    // duration of the (~450ms) animation, keeping the mesh render fed at full speed.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
     // Full virtual-screen canvas: HIS's genie mesh is written in screen-space
     // coordinates (it can spill outside the window rect), so the ghost and its
@@ -1005,64 +873,16 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
 
     BOOL firstFrame = TRUE;
 
-    // Potassiumuncher's v1.5 frame pacer, extended in v3.2.0 for high-refresh
-    // displays: pace delivery at the hosting monitor's own refresh interval
-    // instead of a hard ~120fps cap. Read the hosting monitor's refresh so the
-    // per-frame target matches the panel (5.5ms at 180Hz, 14ms at 71Hz, ...).
-    // On the primary monitor DwmFlush below is the vsync gate; on a NON-primary
-    // monitor DwmFlush's compose tick can follow another panel's refresh, so
-    // there the QPC pacer becomes the gate and the per-frame DwmFlush is skipped.
-    int paceHz = 120;            // fallback when the refresh rate can't be read
-    BOOL pacerIsGate = FALSE;    // TRUE: QPC pacer replaces DwmFlush as the gate
-    {
-        MONITORINFOEXW pmi;
-        pmi.cbSize = sizeof(pmi);
-        if (data->hMon && GetMonitorInfoW(data->hMon, &pmi)) {
-            DEVMODEW dm = {0};
-            dm.dmSize = sizeof(dm);
-            if (EnumDisplaySettingsW(pmi.szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
-                dm.dmDisplayFrequency >= 30) {
-                paceHz = (int)dm.dmDisplayFrequency;
-                if (paceHz > 240) paceHz = 240;  // bound the mesh render cost
-                if (!(pmi.dwFlags & MONITORINFOF_PRIMARY)) pacerIsGate = TRUE;
-            }
-        }
-    }
-    const double kTargetFrameMs = 1000.0 / (double)paceHz;
-    LARGE_INTEGER qpcLastFrame = qpcStart;
-
-    // The pacer's wait needs sub-millisecond precision or it can't hit a
-    // high-refresh interval: plain Sleep() rounds up to the system timer
-    // granularity (~15.6ms by default), which silently caps delivery at ~64fps
-    // on ANY panel faster than that - smooth-looking at 60-71Hz but visibly
-    // choppy at 120/144/180Hz. A high-resolution waitable timer waits to ~0.5ms.
-    // NULL on pre-1803 Windows -> the wait loop falls back to a busy spin.
-    HANDLE hPaceTimer = CreateWaitableTimerExW(
-        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-
+    // Render continuously, exactly like the standalone custom-animations-genie
+    // mod this engine was ported from: no ~120fps pacer and no per-frame
+    // DwmFlush. Gating every frame behind a timer AND the DWM compose tick
+    // serializes to render_time + vsync per frame, which halves the delivered
+    // frame rate as soon as the mesh render takes longer than one refresh
+    // interval - visibly choppier than the uncapped standalone loop, where DWM
+    // always composites the freshest frame at each vsync.
     if (d2dOk) {
         for (;;) {
-            for (;;) {
-                QueryPerformanceCounter(&qpcNow);
-                double sinceLastMs = (qpcNow.QuadPart - qpcLastFrame.QuadPart) * 1000.0 / qpcFreq.QuadPart;
-                if (sinceLastMs >= kTargetFrameMs) break;
-                double remainingMs = kTargetFrameMs - sinceLastMs;
-                // Wait the bulk on the hi-res timer, spin the last ~0.5ms so we
-                // land on the target instead of overshooting past it.
-                if (hPaceTimer && remainingMs > 0.6) {
-                    LARGE_INTEGER due;
-                    due.QuadPart = -(LONGLONG)((remainingMs - 0.5) * 10000.0); // rel, 100ns units
-                    if (SetWaitableTimer(hPaceTimer, &due, 0, nullptr, nullptr, FALSE)) {
-                        WaitForSingleObject(hPaceTimer, (DWORD)remainingMs + 2);
-                    } else {
-                        YieldProcessor();
-                    }
-                } else {
-                    YieldProcessor();
-                }
-            }
-            qpcLastFrame = qpcNow;
-
+            QueryPerformanceCounter(&qpcNow);
             double elapsedMs = (qpcNow.QuadPart - qpcStart.QuadPart) * 1000.0 / qpcFreq.QuadPart;
             BOOL lastFrame = (elapsedMs >= animDur);
 
@@ -1246,26 +1066,20 @@ DWORD WINAPI MacGenieAnimThread(LPVOID lpParam) {
             // transitions.
             if (g_unloading.load(std::memory_order_relaxed)) break;
 
-            // Block until the next DWM compose cycle - the vsync sync point
-            // (MINE). Skipped on non-primary monitors, where the compose tick
-            // tracks another panel's refresh and the QPC pacer above gates at
-            // the hosting monitor's true interval instead. The first frame
-            // still waits one compose so the no-gap handoff below only fires
-            // once the frame is really on screen, on every monitor.
-            if (!pacerIsGate || firstFrame) DwmFlush();
-
+            // The first real frame has been presented on the ghost. For a
+            // minimize the hook is holding the REAL minimize (or, on the
+            // auto-hide path, the cloak-hide) back until this moment - otherwise
+            // the window would vanish a few frames before the genie appears.
+            // One DwmFlush here guarantees it is composed on screen before the
+            // handoff; every subsequent frame renders uncapped like the
+            // standalone mod.
             if (firstFrame && !degenerate) {
+                DwmFlush();
                 firstFrame = FALSE;
-                // The first real frame has now been composed on screen. For a
-                // minimize the hook is holding the REAL minimize (or, on the
-                // auto-hide path, the cloak-hide) back until this moment - otherwise
-                // the window would vanish a few frames before the genie appears.
                 if (data->hFirstFrameShown) SetEvent(data->hFirstFrameShown);
             }
         }
     }
-
-    if (hPaceTimer) { CloseHandle(hPaceTimer); hPaceTimer = nullptr; }
 
     if (cachedOutlineGeo) { cachedOutlineGeo->Release(); cachedOutlineGeo = nullptr; }
 
@@ -1663,15 +1477,6 @@ bool StartMacGenieAnim(HWND hWnd, BOOL rising, LONG_PTR originalExStyle,
     // rising caller gets its hide undone, a falling caller gets DWM transitions
     // back so the DEFAULT system animation plays for the excluded app.
     if (MacGenieIsExcluded(hWnd)) {
-        if (rising) MacGenieUndoRisingHide(hWnd, originalExStyle, cloakHidden);
-        else MacGenieSetDwmTransitions(hWnd, TRUE);
-        return false;
-    }
-
-    // Anti-loop breaker (v3.2.0): mute windows whose owner re-triggers a new
-    // minimize/restore the instant each genie ends (Firefox-family loop
-    // reports). Bail pattern identical to the exclusion gate above.
-    if (MacGenieLoopBreakerTripped(hWnd)) {
         if (rising) MacGenieUndoRisingHide(hWnd, originalExStyle, cloakHidden);
         else MacGenieSetDwmTransitions(hWnd, TRUE);
         return false;
