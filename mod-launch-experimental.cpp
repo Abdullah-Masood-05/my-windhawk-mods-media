@@ -32,10 +32,14 @@ Definitely not inspired from MacOS.
 There are two genie styles, selectable in the settings (**Animation style**):
 
 - **Modern** (default) - the Direct2D genie engine contributed by **Potassiumuncher**:
-  a smooth mesh warp that necks the window down into the taskbar. The demo GIF above
-  shows it.
+  a smooth mesh warp that necks the window down into the taskbar:
+
+![Modern genie demo](https://raw.githubusercontent.com/Potassiumuncher/MacOS-Animation-for-windows/99a9a78e9a06c49b282cc8e337854840a9f7fa73/Desktop2026.07.02-19.32.49.05-ezgif.com-video-to-gif-converter.gif)
+
 - **Classic** - this mod's original strip-based genie: lighter, with a slightly
-  different look. Kept because some people preferred it.
+  different look. Kept because some people preferred it:
+
+![Classic genie demo](https://raw.githubusercontent.com/Abdullah-Masood-05/my-windhawk-mods-media/main/macos-minimize-animation.gif)
 
 ## Credits
 The **Modern** genie style - the Direct2D genie rendering engine (a configurable
