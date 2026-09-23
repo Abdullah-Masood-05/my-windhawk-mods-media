@@ -150,7 +150,10 @@ minimize behind it without the system's own animation getting in the way.
   effect, since the terminal window doesn't belong to PowerShell.
 
 ## Notes
-- Works on all top-level windows; child / tiny / hidden windows are skipped.
+- Works on all top-level windows; child / tiny / hidden / off-screen windows are
+  skipped, and so are windows that start minimized (they were never on screen).
+  This keeps apps that park windows off-screen or start them minimized - e.g.
+  Lively Wallpaper's wallpaper players - working normally.
 - DWM transitions are temporarily disabled on the animated window and restored
   afterwards, so the system's own minimize/restore animation doesn't fight ours.
 - Minimize snapshots are captured from the window itself, so the taskbar and other
@@ -494,7 +497,24 @@ static bool MacGenieShouldAnimate(HWND hWnd) {
         return false;
     }
     if ((r.right - r.left) < 40 || (r.bottom - r.top) < 40) return false;
+    // Parked entirely off-screen (Lively Wallpaper keeps its wallpaper player
+    // windows at -9999,0 until it re-parents them onto the desktop): no monitor
+    // shows the window, so there is nothing to animate from or to.
+    if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) return false;
     return true;
+}
+
+// A minimize only has something to animate if the window is on screen right now.
+// A hidden window being shown straight into the minimized state (SW_SHOWMINNOACTIVE
+// on a never-shown window: "start minimized" apps, mpv's --window-minimized,
+// WinForms / WPF WindowState=Minimized) or an already-iconic one has no frame to
+// warp. Animating those also broke Lively Wallpaper: the hook holds the real show
+// back until the ghost's first frame, so the ghost was briefly the player process's
+// ONLY visible top-level window - and Lively finds its player window as "first
+// visible top-level window of the process", so it grabbed the ghost, parented THAT
+// to the desktop, and left the real wallpaper floating as a normal window.
+static bool MacGenieCanAnimateMinimize(HWND hWnd) {
+    return IsWindowVisible(hWnd) && !IsIconic(hWnd) && MacGenieShouldAnimate(hWnd);
 }
 
 // A real, top-level window with a title bar (skips child windows, tool windows,
@@ -2121,7 +2141,7 @@ static void MacGenieLaunchCommit(HWND hWnd, LONG_PTR originalExStyle) {
 
 BOOL WINAPI ShowWindow_Hook(HWND hWnd, int nCmdShow) {
     if (nCmdShow == SW_MINIMIZE || nCmdShow == SW_SHOWMINIMIZED || nCmdShow == SW_SHOWMINNOACTIVE) {
-        if (MacGenieShouldAnimate(hWnd)) {
+        if (MacGenieCanAnimateMinimize(hWnd)) {
             MacGenieSetDwmTransitions(hWnd, FALSE);
             StartMacGenieAnim(hWnd, FALSE, GetWindowLongPtrW(hWnd, GWL_EXSTYLE));
         }
@@ -2170,7 +2190,7 @@ LRESULT WINAPI DefWindowProcW_Hook(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lP
             if (GetPropW(hWnd, L"GenieBypass")) {
                 return DefWindowProcW_Original(hWnd, Msg, wParam, lParam);
             }
-            if (MacGenieShouldAnimate(hWnd)) {
+            if (MacGenieCanAnimateMinimize(hWnd)) {
                 // Auto-hide taskbar? Reveal it, defer the real minimize until the
                 // animation finishes so it doesn't slide away mid-genie.
                 // (Potassiumuncher's engine, reconciled with MINE's cloak hide.)
@@ -2238,8 +2258,7 @@ LRESULT WINAPI DefWindowProcW_Hook(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lP
 // SetWindowPlacement, or CloseWindow. Shared minimize kick-off for those paths (no
 // unhide handling - that lives on the SC_MINIMIZE path only).
 static void MacGenieTryMinimizeAnim(HWND hWnd) {
-    if (!IsWindowVisible(hWnd) || IsIconic(hWnd)) return;
-    if (!MacGenieShouldAnimate(hWnd)) return;
+    if (!MacGenieCanAnimateMinimize(hWnd)) return;
     MacGenieSetDwmTransitions(hWnd, FALSE);
     StartMacGenieAnim(hWnd, FALSE, GetWindowLongPtrW(hWnd, GWL_EXSTYLE));
 }
