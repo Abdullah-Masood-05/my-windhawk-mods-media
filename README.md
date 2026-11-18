@@ -27,6 +27,10 @@ A smooth animated transition - **crossfade** or **slide** - when switching tabs
 
 ![Task Manager slide](./taskmgr-tab-slide-animation-slide-v2.gif)
 
+## Support
+
+**[Get private Discord access](https://buy.polar.sh/polar_cl_iccBChKQyqil3EgBBtV6qM3lfDpLk4sVu1OpK1j0jQ4)**: early access to test builds, quicker replies to your issues, and a direct line to me.
+
 ---
 
 Author: [Abdullah Masood](https://github.com/Abdullah-Masood-05)
